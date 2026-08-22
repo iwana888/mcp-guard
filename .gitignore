@@ -1,0 +1,4 @@
+# build artifacts / temp
+/tmp/
+/.tmp/
+*.exe

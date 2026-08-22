@@ -1,0 +1,599 @@
+
+
+# MCP-Guard Pro 需求
+
+## 1. 产品重新定位
+
+### MCP-Guard
+
+**MCP 执行层安全策略网关**
+
+一句话：
+
+> **身份认证解决“谁能调用”，MCP-Guard 解决“这一次到底能不能执行”。**
+
+不要再宣传成：
+
+> MCP 没有权限管控
+
+这个说法容易被你的实际架构打脸。
+
+应该明确区分：
+
+```text
+                 用户身份
+                    │
+                    ▼
+              Authentication
+                    │
+              “你是谁？”
+                    │
+                    ▼
+              Authorization
+                    │
+              “你能调用什么？”
+                    │
+                    ▼
+             MCP-Guard
+                    │
+          “这次具体操作安全吗？”
+                    │
+        ┌───────────┼───────────┐
+        ▼           ▼           ▼
+      ALLOW       DENY         ASK
+        │                         │
+        │                       人工审批
+        │                         │
+        └───────────┬─────────────┘
+                    ▼
+                 Tool
+                    │
+                    ▼
+                TCService
+```
+
+---
+
+# 2. 你的 TCService 场景就是最好的 Demo
+
+比如：
+
+用户在酒店前台登录：
+
+```text
+用户：张三
+Token：eyJ...
+```
+
+然后用户说：
+
+> 给 104 房发一张新卡
+
+Agent 产生：
+
+```json
+{
+  "tool": "issue_card",
+  "arguments": {
+    "room": "104",
+    "guest": "张三"
+  }
+}
+```
+
+MCP Client 透传：
+
+```text
+Authorization: Bearer eyJ...
+```
+
+MCP Server 鉴权：
+
+```text
+Token → 用户身份 → 权限检查
+```
+
+确认：
+
+```text
+张三
+  ↓
+有权限
+  ↓
+允许调用 issue_card
+```
+
+但是**这里还没有结束**。
+
+MCP-Guard 再检查：
+
+```text
+User: 张三
+Tool: issue_card
+Room: 104
+Action: 发卡
+```
+
+然后：
+
+```text
+        MCP-Guard
+            │
+            ▼
+      Policy Engine
+            │
+      ┌─────┼─────┐
+      ▼     ▼     ▼
+    ALLOW  ASK   DENY
+```
+
+这就是你产品真正有价值的地方。
+
+---
+
+# 3. 为什么已经有 Token，还需要 MCP-Guard？
+
+这是最关键的产品解释。
+
+### Token 解决的是：
+
+> **身份和权限。**
+
+例如：
+
+```text
+张三是否可以调用 issue_card？
+```
+
+答案：
+
+```text
+YES
+```
+
+但是 Token 并不能天然表达：
+
+```text
+张三今天已经给 200 个房间发卡了
+```
+
+或者：
+
+```text
+一次最多给 1 个房间发卡
+```
+
+或者：
+
+```text
+晚上 23:00 后禁止发卡
+```
+
+或者：
+
+```text
+主卡 / Master Card 必须人工审批
+```
+
+或者：
+
+```text
+批量发卡必须 ASK
+```
+
+或者：
+
+```text
+104 房可以发卡，
+但不能给 104 发 Master Key
+```
+
+这才是 Runtime 的价值。
+
+---
+
+# 4. MCP-Guard 不应该替代你的 Token 鉴权
+
+这一点应该写死在需求里：
+
+> **MCP-Guard 不负责身份认证，不替代 MCP Server 的 Authorization。**
+
+它应该**透传身份上下文**。
+
+例如：
+
+```go
+type ToolCall struct {
+    Tool      string
+    Arguments map[string]any
+
+    Meta map[string]string
+}
+```
+
+里面可以有：
+
+```text
+user_id
+tenant_id
+hotel_id
+session_id
+token_id
+role
+```
+
+甚至：
+
+```text
+request_id
+client_id
+```
+
+但：
+
+**MCP-Guard 不负责验证 Token。**
+
+Token 验证还是：
+
+```text
+MCP Server / AuthServer
+```
+
+负责。
+
+---
+
+# 5. MCP-Guard 真正要做的是 Policy
+
+例如你的酒店场景可以直接出现非常漂亮的策略。
+
+### 普通发卡
+
+```text
+issue_card
+room=104
+card_type=guest
+```
+
+↓
+
+```text
+ALLOW
+```
+
+---
+
+### Master Card
+
+```text
+issue_card
+room=104
+card_type=master
+```
+
+↓
+
+```text
+ASK
+```
+
+因为：
+
+> Master Card 属于高风险操作，需要人工确认。
+
+---
+
+### 批量发卡
+
+```text
+issue_card
+rooms=[101,102,103,...,130]
+```
+
+↓
+
+```text
+ASK
+```
+
+---
+
+### 非营业时间
+
+```text
+23:58
+issue_card
+```
+
+↓
+
+```text
+ASK
+```
+
+---
+
+### 用户尝试越权
+
+Token 本身可能已经通过了：
+
+```text
+Authorization = OK
+```
+
+但是 Runtime 根据业务上下文：
+
+```text
+hotel_id = A
+room = B-999
+```
+
+发现跨酒店：
+
+```text
+DENY
+```
+
+---
+
+# 6. 所以实际上是“三道门”
+
+这个比之前的 PRD 更准确。
+
+```text
+                 AI Agent
+                    │
+                    ▼
+             MCP Client
+                    │
+             Token + ToolCall
+                    │
+                    ▼
+        ┌──────────────────────┐
+        │   MCP Server/Auth    │
+        │                      │
+        │  Authentication      │
+        │  Authorization       │
+        └──────────┬───────────┘
+                   │
+             “你是谁？”
+             “你有权限吗？”
+                   │
+                   ▼
+        ┌──────────────────────┐
+        │      MCP-Guard       │
+        │                      │
+        │  Policy              │
+        │  Risk                │
+        │  Rate Limit          │
+        │  Approval            │
+        │  Audit               │
+        └──────────┬───────────┘
+                   │
+        “这次操作安全吗？”
+                   │
+          ALLOW / DENY / ASK
+                 / MODIFY
+                   │
+                   ▼
+                 Tool
+                   │
+                   ▼
+               TCService
+                   │
+                   ▼
+                  门锁
+```
+
+这就比“一个 MCP 防火墙”准确得多。
+
+---
+
+# 7. MCP-Guard Pro 的核心卖点
+
+我反而建议你不要把它做成一个“大而全 MCP 平台”。
+
+核心就四件事情：
+
+### ① Action Policy
+
+判断：
+
+```text
+谁
+调用什么
+对什么对象
+做什么操作
+```
+
+例如：
+
+```text
+user = 张三
+tool = issue_card
+hotel = H001
+room = 104
+card_type = master
+```
+
+---
+
+### ② Risk Decision
+
+统一：
+
+```text
+ALLOW
+DENY
+ASK
+MODIFY
+```
+
+这就是你已经有的 `agent-reliability`。
+
+---
+
+### ③ Approval
+
+ASK：
+
+```text
+ToolCall
+   ↓
+ASK
+   ↓
+Approval Request
+   ↓
+管理员
+   ↓
+Approve / Reject
+   ↓
+继续执行 / 终止
+```
+
+---
+
+### ④ Audit
+
+最终形成：
+
+```text
+谁
+什么时候
+从哪里
+调用了什么 Tool
+参数是什么
+命中了什么 Policy
+为什么 ALLOW / DENY / ASK / MODIFY
+谁审批
+最终执行结果
+```
+
+这东西企业才真正愿意付钱。
+
+---
+
+# 8. 最重要的一点：不要把 MCP-Guard 做成“另一个鉴权系统”
+
+你的现有架构其实已经给了你一个非常好的边界：
+
+```text
+AuthServer
+    ↓
+身份 / Token / 权限
+```
+
+而：
+
+```text
+MCP-Guard
+    ↓
+动作风险 / 策略 / 审批 / 审计
+```
+
+两者正好互补。
+
+甚至可以定义：
+
+> **Authorization answers “Can you call this tool?”
+> MCP-Guard answers “Should this specific invocation execute?”**
+
+这个定位非常漂亮。
+
+---
+
+# 9. 第一版甚至不需要搞复杂透明代理
+
+我现在反而建议你**不要马上做“万能 MCP JSON-RPC 透明代理”**。
+
+因为你已经有真实的 MCP Client → MCP Server 架构。
+
+第一版可以直接：
+
+```text
+MCP Server
+    ↓
+Tool Call
+    ↓
+MCP-Guard
+    ↓
+agent-reliability
+    ↓
+ALLOW/DENY/ASK/MODIFY
+    ↓
+TCService
+```
+
+也就是：
+
+```go
+func (s *Server) CallTool(ctx context.Context, call ToolCall) error {
+
+    decision := guard.Check(ctx, call)
+
+    switch decision.Type {
+    case ALLOW:
+        return execute(ctx, call)
+
+    case DENY:
+        return ErrDenied
+
+    case ASK:
+        return approval.Wait(ctx, decision)
+
+    case MODIFY:
+        return execute(ctx, *decision.Suggested)
+    }
+
+    return nil
+}
+```
+
+**这才是 MVP。**
+
+等验证有人真的需要：
+
+```text
+任何 MCP Client
+      ↓
+MCP-Guard Proxy
+      ↓
+任何 MCP Server
+```
+
+再做透明代理。
+
+---
+
+## 10. 这样一来，你现在两个项目的关系也非常清楚
+
+```text
+                 agent-reliability
+                 通用安全运行时
+                        │
+          ┌─────────────┴─────────────┐
+          │                           │
+       MCP-Guard                 其他 Agent
+          │
+      MCP Adapter
+          │
+      MCP Server
+          │
+       Tool
+          │
+      TCService
+          │
+        门锁
+```
+
+所以你现在做的 **agent-reliability 并没有白做**。
+
+它应该成为：
+
+> **安全决策内核**
+
+而 `MCP-Guard` 才是：
+
+> **面向 MCP 世界的产品化入口。**
+
+这比原来那份“**MCP 没有权限管控**”的 PRD准确很多，也更符合你已经做出来的 TCService 架构。
