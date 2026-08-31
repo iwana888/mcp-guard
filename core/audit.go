@@ -9,16 +9,28 @@ import (
 
 // AuditRecord is a single immutable log entry for one tool-call decision.
 type AuditRecord struct {
-	ID         string          `json:"id"`
-	Time       time.Time       `json:"time"`
-	Tool       string          `json:"tool"`
-	Arguments  json.RawMessage `json:"arguments"`
-	Actor      string          `json:"actor"`
-	Channel    string          `json:"channel"`
-	PolicyID   string          `json:"policy_id,omitempty"`
-	Decision   string          `json:"decision"`
-	Reason     string          `json:"reason"`
-	ApprovedBy string          `json:"approved_by,omitempty"`
+	ID          string          `json:"id"`
+	Time        time.Time       `json:"time"`
+	Tool        string          `json:"tool"`
+	Arguments   json.RawMessage `json:"arguments"`
+	Actor       string          `json:"actor"`
+	Channel     string          `json:"channel"`
+	PolicyID    string          `json:"policy_id,omitempty"`
+	Decision    string          `json:"decision"`
+	Reason      string          `json:"reason"`
+	ApprovedBy  string          `json:"approved_by,omitempty"`
+	// Mode is the guard mode at decision time (enforce | observe).
+	Mode string `json:"mode,omitempty"`
+	// WouldBe is the verdict the policy would have produced under enforce
+	// mode. In enforce mode it equals Decision; in observe mode it records
+	// what *would* have happened, while Decision stays ALLOW.
+	WouldBe string `json:"would_be,omitempty"`
+	// ReceiptID is a stable id returned to the caller (for correlation).
+	ReceiptID string `json:"receipt_id,omitempty"`
+	// RequestHash is SHA-256 of the canonical request (tool + args + meta).
+	RequestHash string `json:"request_hash,omitempty"`
+	// TargetServer is the upstream the call would be (or was) sent to.
+	TargetServer string `json:"target_server,omitempty"`
 }
 
 // AuditSink persists audit records. Implement this to ship logs to your

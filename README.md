@@ -1,4 +1,4 @@
-# MCP-Guard
+# AgentWorld Guard (formerly MCP Guard)
 
 An HTTP reverse proxy that sits **between an MCP Client and an MCP Server**,
 evaluating every `tools/call` through the **agent-reliability** kernel before
@@ -61,21 +61,72 @@ MCP-Guard only judges **action risk** from the request's identity context.
 mcp-guard/
 ├─ go.mod                      # module + replace → ../agent-reliability
 ├─ core/
-│  ├─ core.go                  # ToolCall/Meta, Guard.Check gateway, decision routing
+│  ├─ core.go                  # ToolCall/Meta, Guard.Check gateway, observe mode, redaction
 │  ├─ audit.go                 # AuditRecord + AuditSink (in-memory default)
+│  ├─ jsonl.go                 # FileAuditSink → audit.jsonl
 │  ├─ approval.go              # Approver: DenyAll / AllowAll / ConsoleApprover
-│  └─ core_test.go
+│  └─ *_test.go
+├─ policy/
+│  ├─ yaml.go                  # YAML → kernel Policy loader
+│  └─ defaults.go              # built-in safety baseline (shell/SQL/deploy)
 ├─ hotel/
 │  └─ hotel.go                 # domain policies: issue_card, get_guest_profile
 ├─ httpgw/
 │  ├─ httpgw.go                # HTTP MCP reverse proxy (only intercepts tools/call)
-│  └─ httpgw_test.go           # end-to-end ALLOW/DENY/ASK/MODIFY + passthrough
-├─ cmd/mcp-guard/              # HTTP gateway entrypoint
-├─ server/hotel/               # minimal REAL upstream MCP Server (for P1 e2e)
+│  └─ *_test.go                # end-to-end ALLOW/DENY/ASK/MODIFY + JSONL audit
+├─ cmd/guard/                 # CLI: serve / check / demo
+├─ server/hotel/               # minimal REAL upstream MCP Server (for e2e)
 └─ examples/hotel/             # library-level demo (no HTTP)
 ```
 
-## Run the end-to-end demo (P1)
+## Policy as YAML
+
+Rules are declarative — no Go needed to configure the guard. Drop a file and
+point `-config` at it (or rely on the built-in safety baseline):
+
+```yaml
+rules:
+  - id: block-dangerous-shell
+    tool: shell
+    command_contains: ["rm -rf", "mkfs", "shutdown"]
+    action: deny
+
+  - id: require-approval-production-deploy
+    tool: deploy
+    params:
+      environment: "production"
+    action: ask
+
+  - id: strip-privileged
+    tool: issue_card
+    params:
+      privileged: "true"
+    action: modify
+    modify_to:
+      privileged: "false"
+```
+
+Match dimensions (all AND-ed): `tool` / `command_contains` (target + `command`/
+`query`/`sql` args) / `arg_contains` (any arg value) / `params` (exact).
+Actions: `allow` | `deny` | `ask` | `modify` (with `modify_to`). Unknown action
+fails **closed** (deny). The built-in baseline already blocks destructive shell
+commands and dangerous SQL, and asks before shell / production deploys.
+
+## Modes: enforce vs observe
+
+- `enforce` (default): decisions block or rewrite the call as usual.
+- `observe`: every call runs **as if ALLOW** (shadow mode); the audit trail
+  records `would_be` = what the policy *would* have decided. Use this to
+  validate a policy against live traffic before turning it on.
+
+## Audit (JSONL)
+
+Every decision is appended to `audit.jsonl` (one JSON object per line) with:
+`receipt_id`, `request_hash` (SHA-256 of tool+args+meta), `target_server`,
+`policy_id`, `decision`, `would_be` (observe), `mode`, `actor`, and arguments
+with **sensitive keys** (`token`, `password`, `secret`, …) masked as `***`.
+
+## Run
 
 Terminal 1 — the real MCP Server (behind the guard):
 
@@ -83,18 +134,29 @@ Terminal 1 — the real MCP Server (behind the guard):
 go run ./server/hotel -listen :18080
 ```
 
-Terminal 2 — MCP-Guard in front of it:
+Terminal 2 — AgentWorld Guard in front of it:
 
 ```bash
-UPSTREAM=http://127.0.0.1:18080 go run ./cmd/mcp-guard -listen :8080 -approve auto
+go run ./cmd/guard serve \
+  -upstream http://127.0.0.1:18080 \
+  -listen :8080 -approve auto \
+  -audit audit.jsonl -mode enforce
 ```
 
-Terminal 3 — client now talks to MCP-Guard instead of the server:
+Terminal 3 — client now talks to the guard instead of the server:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/mcp \
   -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"issue_card","arguments":{"role":"front_desk","room":"203"}}}'
+```
+
+CLI sub-commands (also `go install github.com/iwana888/mcp-guard/cmd/guard@latest`):
+
+```bash
+guard demo                                   # run the four-scenario demo
+guard check -tool shell -args '{"command":"rm -rf /"}'   # local decision, no server
+guard serve -upstream <url> -config guard.yaml -audit audit.jsonl
 ```
 
 ### Verified scenarios (real HTTP, through the proxy)
@@ -106,8 +168,10 @@ curl -s -X POST http://127.0.0.1:8080/mcp \
 | Master Card | `issue_card{...,card_type:"master"}` | ASK | approved → forwarded |
 | bulk issue | `issue_card{...,rooms:[...]}` | ASK | approved → forwarded |
 | dangerous arg | `issue_card{...,privileged:true}` | MODIFY | `privileged` stripped, forwarded |
+| destructive shell | `shell{command:"rm -rf /"}` | DENY | blocked by YAML baseline |
 | handshake | `tools/list`, `initialize` | — | transparently proxied |
 | token | `Authorization: Bearer ...` | — | passed through verbatim |
+| observe | any call | ALLOW (would_be recorded) | runs, but audited as-if |
 
 ## Hotel key-card policies (hotel/hotel.go)
 
